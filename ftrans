@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+
+import serial
+import base64
+import binascii
+import struct
+import sys
+
+BAUD = 115200
+TIMEOUT = 1
+
+def main(argv):
+    if len(argv) != 3:
+        print("Usage: %s FROM TO" % argv[0])
+        print("Transfer path FROM to path TO.")
+        print("Either FROM or TO must be prefixed with a serial port path and a colon:")
+        print()
+        print("%s cpu0.bit /dev/ttyS0:/cpu0.bit --- send cpu0.bit" % argv[0])
+        print("%s /dev/ttyS0:/cpu0.bit cpu0.bit --- read cpu0.bit" % argv[0])
+        return 0
+
+    from_path = argv[1]
+    to_path = argv[2]
+
+    if ":" in from_path and ":" in to_path:
+        print("Only one path may contain :", file=sys.stderr)
+        return 1
+
+    if ":" not in from_path and ":" not in to_path:
+        print("One path must contain :", file=sys.stderr)
+        return 1
+
+    if ":" in from_path:
+        dev, _, from_path = from_path.partition(":")
+        receive(dev, from_path, to_path)
+    elif ":" in to_path:
+        dev, _, to_path = to_path.partition(":")
+        send(dev, from_path, to_path)
+
+def receive(dev, from_path, to_path):
+    s = serial.Serial(dev, BAUD, timeout=TIMEOUT)
+    start_ftrans(s)
+    try:
+        data_cmd(s, b"open", from_path.encode('ascii'))
+        int_cmd(s, b"seekset", 0)
+        data = []
+        while True:
+            block = decode_read(basic_cmd(s, b"read"))
+            if len(block):
+                data.append(block)
+            else:
+                break
+        data = b''.join(data)
+        basic_cmd(s, b"close")
+    except Exception as e:
+        print("Error: %s" % e, file=sys.stderr)
+        exit_ftrans(s)
+        return 1
+    else:
+        exit_ftrans(s)
+
+    with open(to_path, 'wb') as f:
+        f.write(data)
+
+def send(dev, from_path, to_path):
+    s = serial.Serial(dev, BAUD, timeout=TIMEOUT)
+    f = open(from_path, 'rb')
+    start_ftrans(s)
+    try:
+        data_cmd(s, b"open", to_path.encode('ascii'))
+        int_cmd(s, b"seekset", 0)
+        int_cmd(s, b"truncate", 0)
+        while True:
+            block = f.read(256)
+            if len(block):
+                data_cmd(s, b"write", block)
+            else:
+                break
+        basic_cmd(s, b"close")
+    except Exception as e:
+        print("Error: %s" % e, file=sys.stderr)
+        exit_ftrans(s)
+        f.close()
+        return 1
+    else:
+        exit_ftrans(s)
+        f.close()
+
+
+def start_ftrans(s):
+    s.write(b"\x03ftrans\r")
+    s.readline()
+    s.readline()
+
+def exit_ftrans(s):
+    s.write(b"\x03")
+
+def data_cmd(s, cmd, data):
+    data_b64 = base64.b64encode(data)
+    crc = binascii.crc32(data)
+    s.write(cmd)
+    s.write(b" ")
+    s.write(data_b64)
+    s.write(b" ")
+    s.write(b"%d\r" % crc)
+    return response(s.readline())
+
+def int_cmd(s, cmd, i):
+    data = struct.pack("<i", i)
+    return data_cmd(s, cmd, data)
+
+def basic_cmd(s, cmd):
+    s.write(cmd)
+    s.write(b"\r")
+    return response(s.readline())
+
+def decode_read(data):
+    """Decode the response from 'read', checking CRC and returning bytes"""
+    data, _, crc = data.partition(b" ")
+    data = base64.b64decode(data)
+    crc = int(crc.decode('ascii'))
+
+    if binascii.crc32(data) == crc:
+        return data
+    else:
+        raise Exception("CRC mismatch on received data")
+
+def response(line):
+    """If the response is an ack, return its data (not decoded). If an error,
+    raise it.
+    """
+    if line.startswith(b"ack"):
+        ack, _, data = line.partition(b" ")
+        return data
+    elif line.startswith(b"error"):
+        error, _, text = line.partition(b" ")
+        raise Exception(text.decode('ascii').strip())
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
