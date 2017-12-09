@@ -70,13 +70,18 @@ def send(dev, from_path, to_path):
         data_cmd(s, b"open", to_path.encode('ascii'))
         int_cmd(s, b"seekset", 0)
         int_cmd(s, b"truncate", 0)
+        n_blocks = 0
         while True:
-            block = f.read(256)
+            block = f.read(4096)
             if len(block):
+                n_blocks += 1
+                print("%d" % n_blocks, end='\x0d', file=sys.stderr)
                 data_cmd(s, b"write", block)
             else:
+                print("", file=sys.stderr)
                 break
         basic_cmd(s, b"close")
+        basic_cmd(s, b"sync")
     except Exception as e:
         print("Error: %s" % e, file=sys.stderr)
         exit_ftrans(s)
